@@ -109,6 +109,118 @@ type RuntimePluginStateBuildOutput = (
     Vec<RuntimeToolDefinition>,
 );
 
+fn ensure_kplr_key() {
+    // Skip for non-interactive invocations (output-format json, piped, etc.)
+    if !io::stdin().is_terminal() {
+        return;
+    }
+    // Skip subcommands that don't need the key
+    let args: Vec<String> = env::args().skip(1).collect();
+    let first = args.first().map(|s| s.as_str()).unwrap_or("");
+    if matches!(first, "--help" | "-h" | "--version" | "-V" | "version" | "help") {
+        return;
+    }
+
+    // Check current env
+    if let Ok(key) = env::var("KPLR_KEY") {
+        if key.starts_with("kplr-") && key.len() > 10 {
+            // Key looks valid — set as DASHSCOPE_API_KEY for the proxy
+            env::set_var("DASHSCOPE_API_KEY", &key);
+            return;
+        }
+    }
+
+    // Prompt user
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    writeln!(out, "\n  Welcome to PhysMind CLI").ok();
+    writeln!(out, "  ─────────────────────────────────────────").ok();
+    writeln!(out, "  A PhysMind access key (kplr-...) is required.").ok();
+    writeln!(out, "  Get yours at: https://physmind.ai/install").ok();
+    writeln!(out).ok();
+    write!(out, "  Paste your key: ").ok();
+    out.flush().ok();
+    drop(out);
+
+    let mut key = String::new();
+    io::stdin().read_line(&mut key).ok();
+    let key = key.trim().to_string();
+
+    if !key.starts_with("kplr-") || key.len() < 10 {
+        eprintln!("\n  Invalid key format. Expected: kplr-xxxx");
+        eprintln!("  Get a key at https://physmind.ai/install");
+        std::process::exit(1);
+    }
+
+    // Set for this process
+    env::set_var("DASHSCOPE_API_KEY", &key);
+    env::set_var("KPLR_KEY", &key);
+
+    // Persist to shell profile
+    if let Err(e) = persist_kplr_key(&key) {
+        eprintln!("  Warning: could not save key permanently: {e}");
+        eprintln!("  Add this to your shell profile manually:");
+        eprintln!("    export KPLR_KEY={key}");
+    } else {
+        println!("\n  Key saved! You won't need to enter it again.\n");
+    }
+}
+
+fn persist_kplr_key(key: &str) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "windows")]
+    {
+        // Windows: use setx to persist in user environment
+        std::process::Command::new("setx")
+            .args(["KPLR_KEY", key])
+            .output()?;
+        return Ok(());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let home = env::var("HOME")?;
+        let export_line = format!("\nexport KPLR_KEY={key}\n");
+
+        // Detect which shell profile to write to
+        let profile_path = if let Ok(shell) = env::var("SHELL") {
+            if shell.contains("zsh") {
+                format!("{home}/.zshrc")
+            } else if shell.contains("fish") {
+                format!("{home}/.config/fish/config.fish")
+            } else {
+                format!("{home}/.bashrc")
+            }
+        } else {
+            format!("{home}/.profile")
+        };
+
+        // Avoid duplicate entries
+        let current = fs::read_to_string(&profile_path).unwrap_or_default();
+        if !current.contains("KPLR_KEY=") {
+            let mut file = fs::OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(&profile_path)?;
+            file.write_all(export_line.as_bytes())?;
+        } else {
+            // Update existing entry
+            let updated = current
+                .lines()
+                .map(|l| {
+                    if l.starts_with("export KPLR_KEY=") {
+                        format!("export KPLR_KEY={key}")
+                    } else {
+                        l.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            fs::write(&profile_path, updated + "\n")?;
+        }
+        Ok(())
+    }
+}
+
 fn main() {
     // On Windows, set HOME from USERPROFILE if not already set.
     #[cfg(target_os = "windows")]
@@ -117,6 +229,8 @@ fn main() {
             std::env::set_var("HOME", profile);
         }
     }
+
+    ensure_kplr_key();
 
     if let Err(error) = run() {
         let message = error.to_string();
