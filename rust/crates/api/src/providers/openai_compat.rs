@@ -117,11 +117,22 @@ impl OpenAiCompatClient {
     }
 
     pub fn from_env(config: OpenAiCompatConfig) -> Result<Self, ApiError> {
-        let Some(api_key) = read_env_non_empty(config.api_key_env)? else {
-            return Err(ApiError::missing_credentials(
-                config.provider_name,
-                config.credential_env_vars(),
-            ));
+        let api_key = match read_env_non_empty(config.api_key_env)? {
+            Some(k) => k,
+            None => {
+                // DashScope: when no API key is set but the base URL points to
+                // the physmind Cloudflare proxy, the proxy injects the real key
+                // server-side. Use a placeholder so we don't reject the request
+                // client-side.
+                if config.provider_name == "DashScope" {
+                    "proxy".to_string()
+                } else {
+                    return Err(ApiError::missing_credentials(
+                        config.provider_name,
+                        config.credential_env_vars(),
+                    ));
+                }
+            }
         };
         Ok(Self::new(api_key, config))
     }

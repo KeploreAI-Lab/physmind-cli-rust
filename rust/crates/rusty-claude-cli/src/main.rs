@@ -59,7 +59,7 @@ use tools::{
     execute_tool, mvp_tool_specs, GlobalToolRegistry, RuntimeToolDefinition, ToolSearchOutput,
 };
 
-const DEFAULT_MODEL: &str = "claude-opus-4-6";
+const DEFAULT_MODEL: &str = "qwen3-plus";
 fn max_tokens_for_model(model: &str) -> u32 {
     if model.contains("opus") {
         32_000
@@ -110,15 +110,23 @@ type RuntimePluginStateBuildOutput = (
 );
 
 fn main() {
+    // On Windows, set HOME from USERPROFILE if not already set.
+    #[cfg(target_os = "windows")]
+    if std::env::var("HOME").is_err() {
+        if let Ok(profile) = std::env::var("USERPROFILE") {
+            std::env::set_var("HOME", profile);
+        }
+    }
+
     if let Err(error) = run() {
         let message = error.to_string();
-        if message.contains("`claw --help`") {
+        if message.contains("`physmind --help`") || message.contains("`claw --help`") {
             eprintln!("error: {message}");
         } else {
             eprintln!(
                 "error: {message}
 
-Run `claw --help` for usage."
+Run `physmind --help` for usage."
             );
         }
         std::process::exit(1);
@@ -664,7 +672,7 @@ fn bare_slash_command_guidance(command_name: &str) -> Option<String> {
         .find(|spec| spec.name == command_name)?;
     let guidance = if slash_command.resume_supported {
         format!(
-            "`claw {command_name}` is a slash command. Use `claw --resume SESSION.jsonl /{command_name}` or start `claw` and run `/{command_name}`."
+            "`claw {command_name}` is a slash command. Use `claw --resume SESSION.jsonl /{command_name}` or start `physmind` and run `/{command_name}`."
         )
     } else {
         format!(
@@ -743,7 +751,7 @@ fn format_unknown_option(option: &str) -> String {
         message.push_str(suggestion);
         message.push('?');
     }
-    message.push_str("\nRun `claw --help` for usage.");
+    message.push_str("\nRun `physmind --help` for usage.");
     message
 }
 
@@ -758,7 +766,7 @@ fn format_unknown_direct_slash_command(name: &str) -> String {
         message.push('\n');
         message.push_str(note);
     }
-    message.push_str("\nRun `claw --help` for CLI usage, or start `claw` and use /help.");
+    message.push_str("\nRun `physmind --help` for CLI usage, or start `physmind` and use /help.");
     message
 }
 
@@ -2664,7 +2672,7 @@ fn run_resume_command(
         SlashCommand::Skills { args } => {
             if let SkillSlashDispatch::Invoke(_) = classify_skills_slash_command(args.as_deref()) {
                 return Err(
-                    "resumed /skills invocations are interactive-only; start `claw` and run `/skills <skill>` in the REPL".into(),
+                    "resumed /skills invocations are interactive-only; start `physmind` and run `/skills <skill>` in the REPL".into(),
                 );
             }
             let cwd = env::current_dir()?;
@@ -7739,31 +7747,31 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
         out,
         "      Inspect or maintain a saved session without entering the REPL"
     )?;
-    writeln!(out, "  claw help")?;
+    writeln!(out, "  physmind help")?;
     writeln!(out, "      Alias for --help")?;
-    writeln!(out, "  claw version")?;
+    writeln!(out, "  physmind version")?;
     writeln!(out, "      Alias for --version")?;
-    writeln!(out, "  claw status")?;
+    writeln!(out, "  physmind status")?;
     writeln!(
         out,
         "      Show the current local workspace status snapshot"
     )?;
-    writeln!(out, "  claw sandbox")?;
+    writeln!(out, "  physmind sandbox")?;
     writeln!(out, "      Show the current sandbox isolation snapshot")?;
-    writeln!(out, "  claw doctor")?;
+    writeln!(out, "  physmind doctor")?;
     writeln!(
         out,
         "      Diagnose local auth, config, workspace, and sandbox health"
     )?;
-    writeln!(out, "  claw dump-manifests")?;
-    writeln!(out, "  claw bootstrap-plan")?;
-    writeln!(out, "  claw agents")?;
-    writeln!(out, "  claw mcp")?;
-    writeln!(out, "  claw skills")?;
-    writeln!(out, "  claw system-prompt [--cwd PATH] [--date YYYY-MM-DD]")?;
-    writeln!(out, "  claw login")?;
-    writeln!(out, "  claw logout")?;
-    writeln!(out, "  claw init")?;
+    writeln!(out, "  physmind dump-manifests")?;
+    writeln!(out, "  physmind bootstrap-plan")?;
+    writeln!(out, "  physmind agents")?;
+    writeln!(out, "  physmind mcp")?;
+    writeln!(out, "  physmind skills")?;
+    writeln!(out, "  physmind system-prompt [--cwd PATH] [--date YYYY-MM-DD]")?;
+    writeln!(out, "  physmind login")?;
+    writeln!(out, "  physmind logout")?;
+    writeln!(out, "  physmind init")?;
     writeln!(
         out,
         "  claw export [PATH] [--session SESSION] [--output PATH]"
@@ -7827,29 +7835,29 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
         "  Use /session list in the REPL to browse managed sessions"
     )?;
     writeln!(out, "Examples:")?;
-    writeln!(out, "  claw --model claude-opus \"summarize this repo\"")?;
+    writeln!(out, "  physmind --model claude-opus \"summarize this repo\"")?;
     writeln!(
         out,
         "  claw --output-format json prompt \"explain src/main.rs\""
     )?;
-    writeln!(out, "  claw --compact \"summarize Cargo.toml\" | wc -l")?;
+    writeln!(out, "  physmind --compact \"summarize Cargo.toml\" | wc -l")?;
     writeln!(
         out,
         "  claw --allowedTools read,glob \"summarize Cargo.toml\""
     )?;
-    writeln!(out, "  claw --resume {LATEST_SESSION_REFERENCE}")?;
+    writeln!(out, "  physmind --resume {LATEST_SESSION_REFERENCE}")?;
     writeln!(
         out,
         "  claw --resume {LATEST_SESSION_REFERENCE} /status /diff /export notes.txt"
     )?;
-    writeln!(out, "  claw agents")?;
-    writeln!(out, "  claw mcp show my-server")?;
-    writeln!(out, "  claw /skills")?;
-    writeln!(out, "  claw doctor")?;
-    writeln!(out, "  claw login")?;
-    writeln!(out, "  claw init")?;
-    writeln!(out, "  claw export")?;
-    writeln!(out, "  claw export conversation.md")?;
+    writeln!(out, "  physmind agents")?;
+    writeln!(out, "  physmind mcp show my-server")?;
+    writeln!(out, "  physmind /skills")?;
+    writeln!(out, "  physmind doctor")?;
+    writeln!(out, "  physmind login")?;
+    writeln!(out, "  physmind init")?;
+    writeln!(out, "  physmind export")?;
+    writeln!(out, "  physmind export conversation.md")?;
     Ok(())
 }
 
@@ -9382,7 +9390,7 @@ mod tests {
         let error = parse_args(&["--resum".to_string()]).expect_err("unknown option should fail");
         assert!(error.contains("unknown option: --resum"));
         assert!(error.contains("Did you mean --resume?"));
-        assert!(error.contains("claw --help"));
+        assert!(error.contains("physmind --help"));
     }
 
     #[test]
@@ -9693,15 +9701,15 @@ mod tests {
         let mut help = Vec::new();
         print_help_to(&mut help).expect("help should render");
         let help = String::from_utf8(help).expect("help should be utf8");
-        assert!(help.contains("claw help"));
-        assert!(help.contains("claw version"));
-        assert!(help.contains("claw status"));
-        assert!(help.contains("claw sandbox"));
-        assert!(help.contains("claw init"));
-        assert!(help.contains("claw agents"));
-        assert!(help.contains("claw mcp"));
-        assert!(help.contains("claw skills"));
-        assert!(help.contains("claw /skills"));
+        assert!(help.contains("physmind help"));
+        assert!(help.contains("physmind version"));
+        assert!(help.contains("physmind status"));
+        assert!(help.contains("physmind sandbox"));
+        assert!(help.contains("physmind init"));
+        assert!(help.contains("physmind agents"));
+        assert!(help.contains("physmind mcp"));
+        assert!(help.contains("physmind skills"));
+        assert!(help.contains("physmind /skills"));
     }
 
     #[test]
