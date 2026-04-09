@@ -142,9 +142,11 @@ fn ensure_kplr_key() {
     out.flush().ok();
     drop(out);
 
-    let mut key = String::new();
-    io::stdin().read_line(&mut key).ok();
+    let key = rpassword::read_password().unwrap_or_default();
     let key = key.trim().to_string();
+    // Show masked version so user knows input was received
+    let masked = format!("kplr-{}", "*".repeat(key.len().saturating_sub(5)));
+    println!("  {masked}");
 
     if !key.starts_with("kplr-") || key.len() < 10 {
         eprintln!("\n  Invalid key format. Expected: kplr-xxxx");
@@ -160,7 +162,7 @@ fn ensure_kplr_key() {
     if let Err(e) = persist_kplr_key(&key) {
         eprintln!("  Warning: could not save key permanently: {e}");
         eprintln!("  Add this to your shell profile manually:");
-        eprintln!("    export KPLR_KEY={key}");
+        eprintln!("    export KPLR_KEY=\"{key}\"");
     } else {
         println!("\n  Key saved! You won't need to enter it again.\n");
     }
@@ -179,7 +181,7 @@ fn persist_kplr_key(key: &str) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(not(target_os = "windows"))]
     {
         let home = env::var("HOME")?;
-        let export_line = format!("\nexport KPLR_KEY={key}\n");
+        let is_fish = env::var("SHELL").map(|s| s.contains("fish")).unwrap_or(false);
 
         // Detect which shell profile to write to
         let profile_path = if let Ok(shell) = env::var("SHELL") {
@@ -194,9 +196,23 @@ fn persist_kplr_key(key: &str) -> Result<(), Box<dyn std::error::Error>> {
             format!("{home}/.profile")
         };
 
+        let export_line = if is_fish {
+            format!("\nset -Ux KPLR_KEY \"{key}\"\n")
+        } else {
+            format!("\nexport KPLR_KEY=\"{key}\"\n")
+        };
+
+        let search_marker = if is_fish { "set -Ux KPLR_KEY" } else { "KPLR_KEY=" };
+        let replace_prefix = if is_fish { "set -Ux KPLR_KEY" } else { "export KPLR_KEY=" };
+        let replace_line = if is_fish {
+            format!("set -Ux KPLR_KEY \"{key}\"")
+        } else {
+            format!("export KPLR_KEY=\"{key}\"")
+        };
+
         // Avoid duplicate entries
         let current = fs::read_to_string(&profile_path).unwrap_or_default();
-        if !current.contains("KPLR_KEY=") {
+        if !current.contains(search_marker) {
             let mut file = fs::OpenOptions::new()
                 .append(true)
                 .create(true)
@@ -207,8 +223,8 @@ fn persist_kplr_key(key: &str) -> Result<(), Box<dyn std::error::Error>> {
             let updated = current
                 .lines()
                 .map(|l| {
-                    if l.starts_with("export KPLR_KEY=") {
-                        format!("export KPLR_KEY={key}")
+                    if l.contains(replace_prefix) {
+                        replace_line.clone()
                     } else {
                         l.to_string()
                     }
