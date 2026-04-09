@@ -121,10 +121,16 @@ fn ensure_kplr_key() {
         return;
     }
 
-    // Check current env
+    // Check physmind config file first (most reliable — works across terminals)
+    if let Some(key) = load_kplr_key_from_config() {
+        env::set_var("DASHSCOPE_API_KEY", &key);
+        env::set_var("KPLR_KEY", &key);
+        return;
+    }
+
+    // Check current env (e.g. user set it manually)
     if let Ok(key) = env::var("KPLR_KEY") {
         if key.starts_with("kplr-") && key.len() > 10 {
-            // Key looks valid — set as DASHSCOPE_API_KEY for the proxy
             env::set_var("DASHSCOPE_API_KEY", &key);
             return;
         }
@@ -142,11 +148,9 @@ fn ensure_kplr_key() {
     out.flush().ok();
     drop(out);
 
-    let key = rpassword::read_password().unwrap_or_default();
+    let mut key = String::new();
+    io::stdin().read_line(&mut key).ok();
     let key = key.trim().to_string();
-    // Show masked version so user knows input was received
-    let masked = format!("kplr-{}", "*".repeat(key.len().saturating_sub(5)));
-    println!("  {masked}");
 
     if !key.starts_with("kplr-") || key.len() < 10 {
         eprintln!("\n  Invalid key format. Expected: kplr-xxxx");
@@ -158,14 +162,45 @@ fn ensure_kplr_key() {
     env::set_var("DASHSCOPE_API_KEY", &key);
     env::set_var("KPLR_KEY", &key);
 
-    // Persist to shell profile
-    if let Err(e) = persist_kplr_key(&key) {
-        eprintln!("  Warning: could not save key permanently: {e}");
+    // Persist to config file (primary) + shell profile (secondary)
+    let config_ok = save_kplr_key_to_config(&key).is_ok();
+    let shell_ok = persist_kplr_key(&key).is_ok();
+
+    if config_ok || shell_ok {
+        println!("\n  Key saved! You won't need to enter it again.\n");
+    } else {
+        eprintln!("  Warning: could not save key permanently.");
         eprintln!("  Add this to your shell profile manually:");
         eprintln!("    export KPLR_KEY=\"{key}\"");
-    } else {
-        println!("\n  Key saved! You won't need to enter it again.\n");
     }
+}
+
+fn kplr_config_path() -> Option<PathBuf> {
+    let home = env::var("HOME").ok()?;
+    Some(PathBuf::from(format!("{home}/.config/physmind/credentials")))
+}
+
+fn load_kplr_key_from_config() -> Option<String> {
+    let path = kplr_config_path()?;
+    let content = fs::read_to_string(path).ok()?;
+    for line in content.lines() {
+        if let Some(val) = line.strip_prefix("KPLR_KEY=") {
+            let val = val.trim_matches('"').trim().to_string();
+            if val.starts_with("kplr-") && val.len() > 10 {
+                return Some(val);
+            }
+        }
+    }
+    None
+}
+
+fn save_kplr_key_to_config(key: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let path = kplr_config_path().ok_or("no home dir")?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&path, format!("KPLR_KEY=\"{key}\"\n"))?;
+    Ok(())
 }
 
 fn persist_kplr_key(key: &str) -> Result<(), Box<dyn std::error::Error>> {
