@@ -1,93 +1,89 @@
-# Claw Code
+# PhysMind CLI
 
 <p align="center">
-  <a href="https://github.com/ultraworkers/claw-code">ultraworkers/claw-code</a>
-  ·
-  <a href="./USAGE.md">Usage</a>
-  ·
-  <a href="./rust/README.md">Rust workspace</a>
-  ·
-  <a href="./PARITY.md">Parity</a>
-  ·
-  <a href="./ROADMAP.md">Roadmap</a>
-  ·
-  <a href="https://discord.gg/5TUQKqFWd">UltraWorkers Discord</a>
+  <b>Industrial Physics Brain — Expert AI CLI for Manufacturing, EV R&D, Robotics & CNC</b><br/>
+  Built by <a href="https://physmind.ai">Keplore AI</a>
 </p>
 
 <p align="center">
-  <a href="https://star-history.com/#ultraworkers/claw-code&Date">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=ultraworkers/claw-code&type=Date&theme=dark" />
-      <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=ultraworkers/claw-code&type=Date" />
-      <img alt="Star history for ultraworkers/claw-code" src="https://api.star-history.com/svg?repos=ultraworkers/claw-code&type=Date" width="600" />
-    </picture>
-  </a>
+  <a href="https://physmind.ai/install.html">Install</a>
+  ·
+  <a href="https://github.com/KeploreAI-Lab/physmind-cli-rust">GitHub</a>
+  ·
+  <a href="./rust/README.md">Rust Workspace</a>
 </p>
 
-<p align="center">
-  <img src="assets/claw-hero.jpeg" alt="Claw Code" width="300" />
-</p>
+---
 
-Claw Code is the public Rust implementation of the `claw` CLI agent harness.
-The canonical implementation lives in [`rust/`](./rust), and the current source of truth for this repository is **ultraworkers/claw-code**.
+## What is PhysMind CLI?
 
-> [!IMPORTANT]
-> Start with [`USAGE.md`](./USAGE.md) for build, auth, CLI, session, and parity-harness workflows. Make `claw doctor` your first health check after building, use [`rust/README.md`](./rust/README.md) for crate-level details, read [`PARITY.md`](./PARITY.md) for the current Rust-port checkpoint, and see [`docs/container.md`](./docs/container.md) for the container-first workflow.
+PhysMind CLI is a cross-platform terminal agent powered by Qwen (via Cloudflare proxy — no API key required). It lets engineers and teams in manufacturing, EV R&D, robotics, and CNC machining interact with PhysMind directly from the command line.
 
-## Current repository shape
+- No API key needed — uses Qwen via PhysMind's built-in proxy
+- Works on macOS, Linux, and Windows
+- Streaming responses with thinking display
+- Session history, tool use, bash execution (`!` prefix)
 
-- **`rust/`** — canonical Rust workspace and the `claw` CLI binary
-- **`USAGE.md`** — task-oriented usage guide for the current product surface
-- **`PARITY.md`** — Rust-port parity status and migration notes
-- **`ROADMAP.md`** — active roadmap and cleanup backlog
-- **`PHILOSOPHY.md`** — project intent and system-design framing
-- **`src/` + `tests/`** — companion Python/reference workspace and audit helpers; not the primary runtime surface
+## Install
 
-## Quick start
-
+**macOS / Linux:**
 ```bash
-cd rust
-cargo build --workspace
-./target/debug/claw --help
-./target/debug/claw prompt "summarize this repository"
+curl -fsSL https://physmind.ai/install.sh | sh
 ```
 
-Authenticate with either an API key or the built-in OAuth flow:
-
-```bash
-export ANTHROPIC_API_KEY="sk-ant-..."
-# or
-cd rust
-./target/debug/claw login
+**Windows (PowerShell):**
+```powershell
+irm https://physmind.ai/install.ps1 | iex
 ```
 
-Run the workspace test suite:
+## Quick Start
 
 ```bash
-cd rust
-cargo test --workspace
+physmind
 ```
 
-## Documentation map
+No API key setup required.
 
-- [`USAGE.md`](./USAGE.md) — quick commands, auth, sessions, config, parity harness
-- [`rust/README.md`](./rust/README.md) — crate map, CLI surface, features, workspace layout
-- [`PARITY.md`](./PARITY.md) — parity status for the Rust port
-- [`rust/MOCK_PARITY_HARNESS.md`](./rust/MOCK_PARITY_HARNESS.md) — deterministic mock-service harness details
-- [`ROADMAP.md`](./ROADMAP.md) — active roadmap and open cleanup work
-- [`PHILOSOPHY.md`](./PHILOSOPHY.md) — why the project exists and how it is operated
+## Usage
 
-## Ecosystem
+```
+physmind [OPTIONS] [PROMPT]
 
-Claw Code is built in the open alongside the broader UltraWorkers toolchain:
+Options:
+  --model <MODEL>       Model to use (default: qwen3.6-plus)
+  --resume              Resume the latest session
+  --output-format json  Machine-readable output
+  --help                Show help
+  --version             Show version
+```
 
-- [clawhip](https://github.com/Yeachan-Heo/clawhip)
-- [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent)
-- [oh-my-claudecode](https://github.com/Yeachan-Heo/oh-my-claudecode)
-- [oh-my-codex](https://github.com/Yeachan-Heo/oh-my-codex)
-- [UltraWorkers Discord](https://discord.gg/5TUQKqFWd)
+Run a bash command directly inside the REPL:
+```
+> !ls -la
+```
 
-## Ownership / affiliation disclaimer
+## Build from Source
 
-- This repository does **not** claim ownership of the original Claude Code source material.
-- This repository is **not affiliated with, endorsed by, or maintained by Anthropic**.
+```bash
+git clone https://github.com/KeploreAI-Lab/physmind-cli-rust
+cd physmind-cli-rust/rust
+cargo build --release -p rusty-claude-cli
+./target/release/physmind
+```
+
+## Supported Platforms
+
+| Platform | Binary |
+|----------|--------|
+| macOS (Apple Silicon) | `physmind-macos-arm64` |
+| macOS (Intel) | `physmind-macos-x86_64` |
+| Linux x86_64 | `physmind-linux-x86_64` |
+| Linux arm64 | `physmind-linux-arm64` |
+| Windows x86_64 | `physmind-windows-x86_64.exe` |
+
+## About PhysMind
+
+PhysMind is the industrial physics brain built by [Keplore AI](https://physmind.ai). Expert AI agents for manufacturing intelligence — from process optimization to EV battery inspection, robot calibration, and CNC machining.
+
+- Website: [physmind.ai](https://physmind.ai)
+- Support: support@keploreai.com
