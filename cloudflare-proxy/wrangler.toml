@@ -1,0 +1,20 @@
+name = "physmind-proxy"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+UPSTREAM_BASE_URL = "https://dashscope-us.aliyuncs.com/compatible-mode"
+
+[[kv_namespaces]]
+binding = "TOKENS"
+id = "5dc54a33e8ce453eaf2d5a590712fee6"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "physmind-usage"
+database_id = "476610f1-aea8-4c05-ab4e-87ba7aa6d044"
+
+# Secrets (set via wrangler secret put):
+# DASHSCOPE_API_KEY
+# ADMIN_SECRET  ← for the admin dashboard
