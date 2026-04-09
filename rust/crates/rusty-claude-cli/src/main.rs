@@ -59,7 +59,7 @@ use tools::{
     execute_tool, mvp_tool_specs, GlobalToolRegistry, RuntimeToolDefinition, ToolSearchOutput,
 };
 
-const DEFAULT_MODEL: &str = "qwen3-plus";
+const DEFAULT_MODEL: &str = "qwen-plus";
 fn max_tokens_for_model(model: &str) -> u32 {
     if model.contains("opus") {
         32_000
@@ -6571,6 +6571,7 @@ impl AnthropicRuntimeClient {
         let mut thinking_started = false;
         let mut thinking_start_time: Option<std::time::Instant> = None;
         let mut received_any_event = false;
+        let mut first_text_written = false;
 
         loop {
             let next = if apply_stall_timeout && !received_any_event {
@@ -6625,6 +6626,12 @@ impl AnthropicRuntimeClient {
                                 progress_reporter.mark_text_phase(&text);
                             }
                             if let Some(rendered) = markdown_stream.push(&renderer, &text) {
+                                if !first_text_written {
+                                    first_text_written = true;
+                                    write!(out, "\r\x1b[2K")
+                                        .and_then(|()| out.flush())
+                                        .map_err(|e| RuntimeError::new(e.to_string()))?;
+                                }
                                 write!(out, "{rendered}")
                                     .and_then(|()| out.flush())
                                     .map_err(|error| RuntimeError::new(error.to_string()))?;
