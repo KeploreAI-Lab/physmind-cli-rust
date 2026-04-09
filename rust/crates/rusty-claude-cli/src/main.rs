@@ -63,6 +63,8 @@ const DEFAULT_MODEL: &str = "claude-opus-4-6";
 fn max_tokens_for_model(model: &str) -> u32 {
     if model.contains("opus") {
         32_000
+    } else if model.starts_with("qwen") || model.starts_with("qwen3") {
+        16_000
     } else {
         64_000
     }
@@ -2797,6 +2799,23 @@ fn run_repl(
                     }
                 }
                 editor.push_history(input);
+                if trimmed.starts_with('!') {
+                    let cmd = trimmed[1..].trim();
+                    if !cmd.is_empty() {
+                        let status = std::process::Command::new("sh")
+                            .arg("-c")
+                            .arg(cmd)
+                            .status();
+                        match status {
+                            Ok(s) if !s.success() => {
+                                eprintln!("exit code: {}", s.code().unwrap_or(-1));
+                            }
+                            Err(e) => eprintln!("error: {e}"),
+                            _ => {}
+                        }
+                    }
+                    continue;
+                }
                 cli.record_prompt_history(&trimmed);
                 cli.run_turn(&trimmed)?;
             }
@@ -3367,28 +3386,24 @@ impl LiveCli {
             |path| path.display().to_string(),
         );
         format!(
-            "\x1b[38;5;196m\
- ██████╗██╗      █████╗ ██╗    ██╗\n\
-██╔════╝██║     ██╔══██╗██║    ██║\n\
-██║     ██║     ███████║██║ █╗ ██║\n\
-██║     ██║     ██╔══██║██║███╗██║\n\
-╚██████╗███████╗██║  ██║╚███╔███╔╝\n\
- ╚═════╝╚══════╝╚═╝  ╚═╝ ╚══╝╚══╝\x1b[0m \x1b[38;5;208mCode\x1b[0m 🦞\n\n\
-  \x1b[2mModel\x1b[0m            {}\n\
-  \x1b[2mPermissions\x1b[0m      {}\n\
-  \x1b[2mBranch\x1b[0m           {}\n\
-  \x1b[2mWorkspace\x1b[0m        {}\n\
-  \x1b[2mDirectory\x1b[0m        {}\n\
-  \x1b[2mSession\x1b[0m          {}\n\
-  \x1b[2mAuto-save\x1b[0m        {}\n\n\
+            "\x1b[38;5;33mWelcome to PhysMind\x1b[0m \x1b[2mv{version}\x1b[0m\n\
+\n\
+  \x1b[2mModel\x1b[0m            {model}\n\
+  \x1b[2mPermissions\x1b[0m      {perms}\n\
+  \x1b[2mBranch\x1b[0m           {branch}\n\
+  \x1b[2mWorkspace\x1b[0m        {workspace}\n\
+  \x1b[2mDirectory\x1b[0m        {cwd}\n\
+  \x1b[2mSession\x1b[0m          {session_id}\n\
+  \x1b[2mAuto-save\x1b[0m        {session_path}\n\n\
   Type \x1b[1m/help\x1b[0m for commands · \x1b[1m/status\x1b[0m for live context · \x1b[2m/resume latest\x1b[0m jumps back to the newest session · \x1b[1m/diff\x1b[0m then \x1b[1m/commit\x1b[0m to ship · \x1b[2mTab\x1b[0m for workflow completions · \x1b[2mShift+Enter\x1b[0m for newline",
-            self.model,
-            self.permission_mode.as_str(),
-            git_branch,
-            workspace,
-            cwd,
-            self.session.id,
-            session_path,
+            version = env!("CARGO_PKG_VERSION"),
+            model = self.model,
+            perms = self.permission_mode.as_str(),
+            branch = git_branch,
+            workspace = workspace,
+            cwd = cwd,
+            session_id = self.session.id,
+            session_path = session_path,
         )
     }
 
@@ -3436,7 +3451,7 @@ impl LiveCli {
         let mut spinner = Spinner::new();
         let mut stdout = io::stdout();
         spinner.tick(
-            "🦀 Thinking...",
+            "Thinking...",
             TerminalRenderer::new().color_theme(),
             &mut stdout,
         )?;
@@ -3446,12 +3461,14 @@ impl LiveCli {
         match result {
             Ok(summary) => {
                 self.replace_runtime(runtime)?;
+                // Move to a fresh line so spinner.finish() doesn't clear the last
+                // line of the response (which may not end with a newline).
+                writeln!(stdout)?;
                 spinner.finish(
                     "✨ Done",
                     TerminalRenderer::new().color_theme(),
                     &mut stdout,
                 )?;
-                println!();
                 if let Some(event) = summary.auto_compaction {
                     println!(
                         "{}",
@@ -6543,6 +6560,8 @@ impl AnthropicRuntimeClient {
         let mut pending_tool: Option<(String, String, String)> = None;
         let mut block_has_thinking_summary = false;
         let mut saw_stop = false;
+        let mut thinking_started = false;
+        let mut thinking_start_time: Option<std::time::Instant> = None;
         let mut received_any_event = false;
 
         loop {
@@ -6610,15 +6629,36 @@ impl AnthropicRuntimeClient {
                             input.push_str(&partial_json);
                         }
                     }
-                    ContentBlockDelta::ThinkingDelta { .. } => {
-                        if !block_has_thinking_summary {
-                            render_thinking_block_summary(out, None, false)?;
-                            block_has_thinking_summary = true;
+                    ContentBlockDelta::ThinkingDelta { thinking } => {
+                        if !thinking_started {
+                            thinking_started = true;
+                            thinking_start_time = Some(std::time::Instant::now());
+                            writeln!(out, "\r\x1b[2K\x1b[2m\x1b[38;5;245mThinking...\x1b[0m")
+                                .map_err(|e| RuntimeError::new(e.to_string()))?;
                         }
+                        // Simulate streaming: print char by char
+                        for ch in thinking.chars() {
+                            write!(out, "\x1b[2m\x1b[38;5;245m{ch}\x1b[0m")
+                                .and_then(|()| out.flush())
+                                .map_err(|e| RuntimeError::new(e.to_string()))?;
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                        }
+                        block_has_thinking_summary = true;
                     }
                     ContentBlockDelta::SignatureDelta { .. } => {}
                 },
                 ApiStreamEvent::ContentBlockStop(_) => {
+                    if thinking_started {
+                        let elapsed = thinking_start_time
+                            .map(|t| t.elapsed().as_secs().max(1))
+                            .unwrap_or(1);
+                        // Print separator after streamed thinking
+                        writeln!(out, "\n\x1b[2m\x1b[38;5;245m─── thought for {elapsed}s ───\x1b[0m")
+                            .and_then(|()| out.flush())
+                            .map_err(|e| RuntimeError::new(e.to_string()))?;
+                        thinking_started = false;
+                        thinking_start_time = None;
+                    }
                     block_has_thinking_summary = false;
                     if let Some(rendered) = markdown_stream.flush(&renderer) {
                         write!(out, "{rendered}")
@@ -7418,8 +7458,13 @@ fn push_output_block(
             *pending_tool = Some((id, name, initial_input));
         }
         OutputContentBlock::Thinking { thinking, .. } => {
-            render_thinking_block_summary(out, Some(thinking.chars().count()), false)?;
-            *block_has_thinking_summary = true;
+            // Only print summary for non-streaming (full thinking text present).
+            // In streaming mode, thinking content arrives via ThinkingDelta and
+            // is handled inline — skip the summary here to avoid duplication.
+            if !thinking.is_empty() {
+                render_thinking_block_summary(out, Some(thinking.chars().count()), false)?;
+                *block_has_thinking_summary = true;
+            }
         }
         OutputContentBlock::RedactedThinking { .. } => {
             render_thinking_block_summary(out, None, true)?;

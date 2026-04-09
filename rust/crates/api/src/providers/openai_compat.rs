@@ -18,7 +18,7 @@ use super::{preflight_message_request, Provider, ProviderFuture};
 
 pub const DEFAULT_XAI_BASE_URL: &str = "https://api.x.ai/v1";
 pub const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
-pub const DEFAULT_DASHSCOPE_BASE_URL: &str = "https://dashscope.aliyuncs.com/compatible-mode/v1";
+pub const DEFAULT_DASHSCOPE_BASE_URL: &str = "https://physmind-proxy.marvin-gao-cs.workers.dev/v1";
 const REQUEST_ID_HEADER: &str = "request-id";
 const ALT_REQUEST_ID_HEADER: &str = "x-request-id";
 const DEFAULT_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
@@ -377,6 +377,8 @@ struct StreamState {
     message_started: bool,
     text_started: bool,
     text_finished: bool,
+    reasoning_started: bool,
+    reasoning_finished: bool,
     finished: bool,
     stop_reason: Option<String>,
     usage: Option<Usage>,
@@ -390,6 +392,8 @@ impl StreamState {
             message_started: false,
             text_started: false,
             text_finished: false,
+            reasoning_started: false,
+            reasoning_finished: false,
             finished: false,
             stop_reason: None,
             usage: None,
@@ -431,18 +435,43 @@ impl StreamState {
         }
 
         for choice in chunk.choices {
+            // Handle reasoning_content (Qwen3 thinking) before regular content
+            if let Some(reasoning) = choice.delta.reasoning_content.filter(|v| !v.is_empty()) {
+                if !self.reasoning_started {
+                    self.reasoning_started = true;
+                    events.push(StreamEvent::ContentBlockStart(ContentBlockStartEvent {
+                        index: 0,
+                        content_block: OutputContentBlock::Thinking {
+                            thinking: String::new(),
+                            signature: Some(String::new()),
+                        },
+                    }));
+                }
+                events.push(StreamEvent::ContentBlockDelta(ContentBlockDeltaEvent {
+                    index: 0,
+                    delta: ContentBlockDelta::ThinkingDelta { thinking: reasoning },
+                }));
+            }
+
             if let Some(content) = choice.delta.content.filter(|value| !value.is_empty()) {
+                // Close reasoning block when content starts
+                if self.reasoning_started && !self.reasoning_finished {
+                    self.reasoning_finished = true;
+                    events.push(StreamEvent::ContentBlockStop(ContentBlockStopEvent {
+                        index: 0,
+                    }));
+                }
                 if !self.text_started {
                     self.text_started = true;
                     events.push(StreamEvent::ContentBlockStart(ContentBlockStartEvent {
-                        index: 0,
+                        index: 1,
                         content_block: OutputContentBlock::Text {
                             text: String::new(),
                         },
                     }));
                 }
                 events.push(StreamEvent::ContentBlockDelta(ContentBlockDeltaEvent {
-                    index: 0,
+                    index: 1,
                     delta: ContentBlockDelta::TextDelta { text: content },
                 }));
             }
@@ -495,10 +524,16 @@ impl StreamState {
         self.finished = true;
 
         let mut events = Vec::new();
+        if self.reasoning_started && !self.reasoning_finished {
+            self.reasoning_finished = true;
+            events.push(StreamEvent::ContentBlockStop(ContentBlockStopEvent {
+                index: 0,
+            }));
+        }
         if self.text_started && !self.text_finished {
             self.text_finished = true;
             events.push(StreamEvent::ContentBlockStop(ContentBlockStopEvent {
-                index: 0,
+                index: 1,
             }));
         }
 
@@ -674,6 +709,8 @@ struct ChunkDelta {
     #[serde(default)]
     content: Option<String>,
     #[serde(default)]
+    reasoning_content: Option<String>,
+    #[serde(default)]
     tool_calls: Vec<DeltaToolCall>,
 }
 
@@ -831,11 +868,14 @@ fn translate_message(message: &InputMessage) -> Vec<Value> {
             if text.is_empty() && tool_calls.is_empty() {
                 Vec::new()
             } else {
-                vec![json!({
+                let mut msg = json!({
                     "role": "assistant",
                     "content": (!text.is_empty()).then_some(text),
-                    "tool_calls": tool_calls,
-                })]
+                });
+                if !tool_calls.is_empty() {
+                    msg["tool_calls"] = json!(tool_calls);
+                }
+                vec![msg]
             }
         }
         _ => message

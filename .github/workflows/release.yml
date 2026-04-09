@@ -26,43 +26,82 @@ jobs:
         include:
           - name: linux-x64
             os: ubuntu-latest
-            bin: claw
-            artifact_name: claw-linux-x64
+            target: x86_64-unknown-linux-gnu
+            artifact: physmind-linux-x86_64
+
+          - name: linux-arm64
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            artifact: physmind-linux-arm64
+            cross_linker: aarch64-linux-gnu-gcc
+            cross_pkg: gcc-aarch64-linux-gnu
+
           - name: macos-arm64
             os: macos-14
-            bin: claw
-            artifact_name: claw-macos-arm64
+            target: aarch64-apple-darwin
+            artifact: physmind-macos-arm64
+
+          - name: macos-x64
+            os: macos-13
+            target: x86_64-apple-darwin
+            artifact: physmind-macos-x86_64
+
+          - name: windows-x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: physmind-windows-x86_64.exe
+
     defaults:
       run:
         working-directory: rust
+
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
 
-      - name: Build release binary
-        run: cargo build --release -p rusty-claude-cli
+      - name: Install cross-compilation deps (Linux ARM64)
+        if: matrix.cross_pkg != ''
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ${{ matrix.cross_pkg }}
 
-      - name: Package artifact
+      - name: Build release binary
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.cross_linker }}
+        run: cargo build --release --target ${{ matrix.target }} -p rusty-claude-cli
+
+      - name: Package artifact (Unix)
+        if: matrix.os != 'windows-latest'
         shell: bash
         run: |
           mkdir -p dist
-          cp "target/release/${{ matrix.bin }}" "dist/${{ matrix.artifact_name }}"
-          chmod +x "dist/${{ matrix.artifact_name }}"
+          cp "target/${{ matrix.target }}/release/physmind" "dist/${{ matrix.artifact }}"
+          chmod +x "dist/${{ matrix.artifact }}"
+
+      - name: Package artifact (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/physmind.exe" "dist/${{ matrix.artifact }}"
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact_name }}
-          path: rust/dist/${{ matrix.artifact_name }}
+          name: ${{ matrix.artifact }}
+          path: rust/dist/${{ matrix.artifact }}
 
       - name: Upload release asset
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: rust/dist/${{ matrix.artifact_name }}
+          files: rust/dist/${{ matrix.artifact }}
           fail_on_unmatched_files: true
+          generate_release_notes: true

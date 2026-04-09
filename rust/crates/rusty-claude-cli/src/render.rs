@@ -1,7 +1,7 @@
 use std::fmt::Write as FmtWrite;
 use std::io::{self, Write};
 
-use crossterm::cursor::{MoveToColumn, RestorePosition, SavePosition};
+use crossterm::cursor::MoveToColumn;
 use crossterm::style::{Color, Print, ResetColor, SetForegroundColor, Stylize};
 use crossterm::terminal::{Clear, ClearType};
 use crossterm::{execute, queue};
@@ -44,9 +44,15 @@ impl Default for ColorTheme {
     }
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Spinner {
     frame_index: usize,
+}
+
+impl Default for Spinner {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Spinner {
@@ -54,7 +60,7 @@ impl Spinner {
 
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self { frame_index: 0 }
     }
 
     pub fn tick(
@@ -65,15 +71,13 @@ impl Spinner {
     ) -> io::Result<()> {
         let frame = Self::FRAMES[self.frame_index % Self::FRAMES.len()];
         self.frame_index += 1;
-        queue!(
+        execute!(
             out,
-            SavePosition,
             MoveToColumn(0),
             Clear(ClearType::CurrentLine),
             SetForegroundColor(theme.spinner_active),
             Print(format!("{frame} {label}")),
             ResetColor,
-            RestorePosition
         )?;
         out.flush()
     }

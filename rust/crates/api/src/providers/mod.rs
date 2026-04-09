@@ -186,7 +186,7 @@ pub fn metadata_for_model(model: &str) -> Option<ProviderMetadata> {
     // to the OpenAI-compat client pointed at DashScope's /compatible-mode/v1.
     // Uses the OpenAi provider kind because DashScope speaks the OpenAI REST
     // shape — only the base URL and auth env var differ.
-    if canonical.starts_with("qwen/") || canonical.starts_with("qwen-") {
+    if canonical.starts_with("qwen/") || canonical.starts_with("qwen-") || canonical.starts_with("qwen3") {
         return Some(ProviderMetadata {
             provider: ProviderKind::OpenAi,
             auth_env: "DASHSCOPE_API_KEY",
