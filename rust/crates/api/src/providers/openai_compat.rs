@@ -412,6 +412,22 @@ impl StreamState {
         }
     }
 
+    /// Index of the text content block.  When reasoning is present it
+    /// occupies index 0 and text shifts to 1; otherwise text is at 0.
+    const fn text_index(&self) -> u32 {
+        if self.reasoning_started {
+            1
+        } else {
+            0
+        }
+    }
+
+    /// Base offset for tool-call block indices.  Tool calls are numbered
+    /// starting from `text_index() + 1`.
+    const fn tool_offset(&self) -> u32 {
+        self.text_index() + 1
+    }
+
     fn ingest_chunk(&mut self, chunk: ChatCompletionChunk) -> Result<Vec<StreamEvent>, ApiError> {
         let mut events = Vec::new();
         if !self.message_started {
@@ -446,7 +462,6 @@ impl StreamState {
         }
 
         for choice in chunk.choices {
-            // Handle reasoning_content (Qwen3 thinking) before regular content
             if let Some(reasoning) = choice.delta.reasoning_content.filter(|v| !v.is_empty()) {
                 if !self.reasoning_started {
                     self.reasoning_started = true;
@@ -467,41 +482,44 @@ impl StreamState {
             }
 
             if let Some(content) = choice.delta.content.filter(|value| !value.is_empty()) {
-                // Close reasoning block when content starts
                 if self.reasoning_started && !self.reasoning_finished {
                     self.reasoning_finished = true;
                     events.push(StreamEvent::ContentBlockStop(ContentBlockStopEvent {
                         index: 0,
                     }));
                 }
+                let tidx = self.text_index();
                 if !self.text_started {
                     self.text_started = true;
                     events.push(StreamEvent::ContentBlockStart(ContentBlockStartEvent {
-                        index: 1,
+                        index: tidx,
                         content_block: OutputContentBlock::Text {
                             text: String::new(),
                         },
                     }));
                 }
                 events.push(StreamEvent::ContentBlockDelta(ContentBlockDeltaEvent {
-                    index: 1,
+                    index: tidx,
                     delta: ContentBlockDelta::TextDelta { text: content },
                 }));
             }
 
+            let tool_offset = self.tool_offset();
             for tool_call in choice.delta.tool_calls {
                 let state = self.tool_calls.entry(tool_call.index).or_default();
                 state.apply(tool_call);
-                let block_index = state.block_index();
+                let block_index = state.openai_index + tool_offset;
                 if !state.started {
-                    if let Some(start_event) = state.start_event()? {
+                    if let Some(mut start_event) = state.start_event()? {
+                        start_event.index = block_index;
                         state.started = true;
                         events.push(StreamEvent::ContentBlockStart(start_event));
                     } else {
                         continue;
                     }
                 }
-                if let Some(delta_event) = state.delta_event() {
+                if let Some(mut delta_event) = state.delta_event() {
+                    delta_event.index = block_index;
                     events.push(StreamEvent::ContentBlockDelta(delta_event));
                 }
                 if choice.finish_reason.as_deref() == Some("tool_calls") && !state.stopped {
@@ -518,8 +536,9 @@ impl StreamState {
                     for state in self.tool_calls.values_mut() {
                         if state.started && !state.stopped {
                             state.stopped = true;
+                            let idx = state.openai_index + tool_offset;
                             events.push(StreamEvent::ContentBlockStop(ContentBlockStopEvent {
-                                index: state.block_index(),
+                                index: idx,
                             }));
                         }
                     }
@@ -546,24 +565,28 @@ impl StreamState {
         if self.text_started && !self.text_finished {
             self.text_finished = true;
             events.push(StreamEvent::ContentBlockStop(ContentBlockStopEvent {
-                index: 1,
+                index: self.text_index(),
             }));
         }
 
+        let tool_offset = self.tool_offset();
         for state in self.tool_calls.values_mut() {
             if !state.started {
-                if let Some(start_event) = state.start_event()? {
+                if let Some(mut start_event) = state.start_event()? {
+                    start_event.index = state.openai_index + tool_offset;
                     state.started = true;
                     events.push(StreamEvent::ContentBlockStart(start_event));
-                    if let Some(delta_event) = state.delta_event() {
+                    if let Some(mut delta_event) = state.delta_event() {
+                        delta_event.index = state.openai_index + tool_offset;
                         events.push(StreamEvent::ContentBlockDelta(delta_event));
                     }
                 }
             }
             if state.started && !state.stopped {
                 state.stopped = true;
+                let idx = state.openai_index + tool_offset;
                 events.push(StreamEvent::ContentBlockStop(ContentBlockStopEvent {
-                    index: state.block_index(),
+                    index: idx,
                 }));
             }
         }
