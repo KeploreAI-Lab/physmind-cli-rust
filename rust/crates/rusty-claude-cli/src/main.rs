@@ -41,7 +41,7 @@ use commands::{
 use compat_harness::{extract_manifest, UpstreamPaths};
 use init::initialize_repo;
 use plugins::{PluginHooks, PluginManager, PluginManagerConfig, PluginRegistry};
-use render::{MarkdownStreamState, Spinner, TerminalRenderer};
+use render::TerminalRenderer;
 use runtime::{
     check_base_commit, clear_oauth_credentials, format_stale_base_warning, format_usd,
     generate_pkce_pair, generate_state, load_oauth_credentials, load_system_prompt,
@@ -3621,27 +3621,15 @@ impl LiveCli {
 
     fn run_turn(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
         let (mut runtime, hook_abort_monitor) = self.prepare_turn_runtime(true)?;
-        let mut spinner = Spinner::new();
-        let mut stdout = io::stdout();
-        spinner.tick(
-            "Thinking...",
-            TerminalRenderer::new().color_theme(),
-            &mut stdout,
-        )?;
+        let mut animated = render::AnimatedSpinner::start("Thinking...");
         let mut permission_prompter = CliPermissionPrompter::new(self.permission_mode);
         let result = runtime.run_turn(input, Some(&mut permission_prompter));
         hook_abort_monitor.stop();
         match result {
             Ok(summary) => {
                 self.replace_runtime(runtime)?;
-                // Move to a fresh line so spinner.finish() doesn't clear the last
-                // line of the response (which may not end with a newline).
-                writeln!(stdout)?;
-                spinner.finish(
-                    "✨ Done",
-                    TerminalRenderer::new().color_theme(),
-                    &mut stdout,
-                )?;
+                writeln!(io::stdout())?;
+                animated.stop_with_finish("✨ Done");
                 if let Some(event) = summary.auto_compaction {
                     println!(
                         "{}",
@@ -3653,11 +3641,7 @@ impl LiveCli {
             }
             Err(error) => {
                 runtime.shutdown_plugins()?;
-                spinner.fail(
-                    "❌ Request failed",
-                    TerminalRenderer::new().color_theme(),
-                    &mut stdout,
-                )?;
+                animated.stop_with_fail("❌ Request failed");
                 Err(Box::new(error))
             }
         }
@@ -6727,8 +6711,10 @@ impl AnthropicRuntimeClient {
         } else {
             &mut sink
         };
-        let renderer = TerminalRenderer::new();
-        let mut markdown_stream = MarkdownStreamState::default();
+        // When stdout is a terminal, pace token writes so the terminal emulator
+        // has time to render between them. Without this, tokens that arrive in a
+        // single HTTP chunk get written in a tight loop and appear all at once.
+        let is_tty = self.emit_output && std::io::stdout().is_terminal();
         let mut events = Vec::new();
         let mut pending_tool: Option<(String, String, String)> = None;
         let mut block_has_thinking_summary = false;
@@ -6737,6 +6723,9 @@ impl AnthropicRuntimeClient {
         let mut thinking_start_time: Option<std::time::Instant> = None;
         let mut received_any_event = false;
         let mut first_text_written = false;
+        let mut raw_text_buf = String::new();
+        let mut raw_text_bytes_written: usize = 0;
+        let mut last_text_write = std::time::Instant::now();
 
         loop {
             let next = if apply_stall_timeout && !received_any_event {
@@ -6790,16 +6779,31 @@ impl AnthropicRuntimeClient {
                             if let Some(progress_reporter) = &self.progress_reporter {
                                 progress_reporter.mark_text_phase(&text);
                             }
-                            if let Some(rendered) = markdown_stream.push(&renderer, &text) {
-                                if !first_text_written {
-                                    first_text_written = true;
-                                    write!(out, "\r\x1b[2K")
-                                        .and_then(|()| out.flush())
-                                        .map_err(|e| RuntimeError::new(e.to_string()))?;
-                                }
-                                write!(out, "{rendered}")
+                            if !first_text_written {
+                                first_text_written = true;
+                                render::signal_spinner_stop();
+                                std::thread::sleep(Duration::from_millis(100));
+                                write!(out, "\r\x1b[2K")
                                     .and_then(|()| out.flush())
-                                    .map_err(|error| RuntimeError::new(error.to_string()))?;
+                                    .map_err(|e| RuntimeError::new(e.to_string()))?;
+                            }
+                            write!(out, "{text}")
+                                .and_then(|()| out.flush())
+                                .map_err(|error| RuntimeError::new(error.to_string()))?;
+                            raw_text_bytes_written += text.len();
+                            raw_text_buf.push_str(&text);
+                            // Give the terminal emulator time to render this
+                            // token before the next one arrives. Without this,
+                            // tokens from a buffered HTTP chunk appear at once.
+                            if is_tty {
+                                let elapsed = last_text_write.elapsed();
+                                if elapsed < Duration::from_millis(8) {
+                                    tokio::time::sleep(
+                                        Duration::from_millis(8) - elapsed,
+                                    )
+                                    .await;
+                                }
+                                last_text_write = std::time::Instant::now();
                             }
                             events.push(AssistantEvent::TextDelta(text));
                         }
@@ -6813,16 +6817,15 @@ impl AnthropicRuntimeClient {
                         if !thinking_started {
                             thinking_started = true;
                             thinking_start_time = Some(std::time::Instant::now());
-                            writeln!(out, "\r\x1b[2K\x1b[2m\x1b[38;5;245mThinking...\x1b[0m")
+                            render::signal_spinner_stop();
+                            std::thread::sleep(Duration::from_millis(100));
+                            write!(out, "\r\x1b[2K\x1b[2m\x1b[38;5;245m")
                                 .map_err(|e| RuntimeError::new(e.to_string()))?;
                         }
-                        // Simulate streaming: print char by char
-                        for ch in thinking.chars() {
-                            write!(out, "\x1b[2m\x1b[38;5;245m{ch}\x1b[0m")
-                                .and_then(|()| out.flush())
-                                .map_err(|e| RuntimeError::new(e.to_string()))?;
-                            std::thread::sleep(std::time::Duration::from_millis(5));
-                        }
+                        // Stream reasoning as the API delivers chunks (no artificial delay).
+                        write!(out, "{thinking}")
+                            .and_then(|()| out.flush())
+                            .map_err(|e| RuntimeError::new(e.to_string()))?;
                         block_has_thinking_summary = true;
                     }
                     ContentBlockDelta::SignatureDelta { .. } => {}
@@ -6832,7 +6835,6 @@ impl AnthropicRuntimeClient {
                         let elapsed = thinking_start_time
                             .map(|t| t.elapsed().as_secs().max(1))
                             .unwrap_or(1);
-                        // Print separator after streamed thinking
                         writeln!(out, "\n\x1b[2m\x1b[38;5;245m─── thought for {elapsed}s ───\x1b[0m")
                             .and_then(|()| out.flush())
                             .map_err(|e| RuntimeError::new(e.to_string()))?;
@@ -6840,16 +6842,20 @@ impl AnthropicRuntimeClient {
                         thinking_start_time = None;
                     }
                     block_has_thinking_summary = false;
-                    if let Some(rendered) = markdown_stream.flush(&renderer) {
-                        write!(out, "{rendered}")
+                    // Ensure a trailing newline after the streamed block.
+                    if raw_text_bytes_written > 0
+                        && !raw_text_buf.ends_with('\n')
+                    {
+                        writeln!(out)
                             .and_then(|()| out.flush())
-                            .map_err(|error| RuntimeError::new(error.to_string()))?;
+                            .map_err(|e| RuntimeError::new(e.to_string()))?;
                     }
+                    raw_text_buf.clear();
+                    raw_text_bytes_written = 0;
                     if let Some((id, name, input)) = pending_tool.take() {
                         if let Some(progress_reporter) = &self.progress_reporter {
                             progress_reporter.mark_tool_phase(&name, &input);
                         }
-                        // Display tool call now that input is fully accumulated
                         writeln!(out, "\n{}", format_tool_call_start(&name, &input))
                             .and_then(|()| out.flush())
                             .map_err(|error| RuntimeError::new(error.to_string()))?;
@@ -6861,11 +6867,15 @@ impl AnthropicRuntimeClient {
                 }
                 ApiStreamEvent::MessageStop(_) => {
                     saw_stop = true;
-                    if let Some(rendered) = markdown_stream.flush(&renderer) {
-                        write!(out, "{rendered}")
+                    if raw_text_bytes_written > 0
+                        && !raw_text_buf.ends_with('\n')
+                    {
+                        writeln!(out)
                             .and_then(|()| out.flush())
-                            .map_err(|error| RuntimeError::new(error.to_string()))?;
+                            .map_err(|e| RuntimeError::new(e.to_string()))?;
                     }
+                    raw_text_buf.clear();
+                    raw_text_bytes_written = 0;
                     events.push(AssistantEvent::MessageStop);
                 }
             }

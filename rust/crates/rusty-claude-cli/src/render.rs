@@ -119,6 +119,80 @@ impl Spinner {
     }
 }
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+/// Global flag that `consume_stream` can set to `false` to stop the
+/// background spinner without needing a direct reference to it.
+static SPINNER_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Signal the background spinner to stop (called from `consume_stream`
+/// when the first text token arrives).
+pub fn signal_spinner_stop() {
+    SPINNER_ACTIVE.store(false, Ordering::Relaxed);
+}
+
+/// Animated spinner that runs in a background thread at ~80ms per frame.
+/// Call `stop()` or `stop_with_message()` to halt it before printing
+/// other output on the same line.
+pub struct AnimatedSpinner {
+    running: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl AnimatedSpinner {
+    pub fn start(label: impl Into<String>) -> Self {
+        let label = label.into();
+        SPINNER_ACTIVE.store(true, Ordering::Relaxed);
+        let running = Arc::new(AtomicBool::new(true));
+        let flag = Arc::clone(&running);
+        let handle = std::thread::spawn(move || {
+            let theme = ColorTheme::default();
+            let mut spinner = Spinner::new();
+            let mut out = io::stdout();
+            while flag.load(Ordering::Relaxed) && SPINNER_ACTIVE.load(Ordering::Relaxed) {
+                let _ = spinner.tick(&label, &theme, &mut out);
+                std::thread::sleep(std::time::Duration::from_millis(80));
+            }
+        });
+        Self {
+            running,
+            handle: Some(handle),
+        }
+    }
+
+    fn join_thread(&mut self) {
+        self.running.store(false, Ordering::Relaxed);
+        SPINNER_ACTIVE.store(false, Ordering::Relaxed);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+
+    /// Stop the spinner and clear the line (no message printed).
+    pub fn stop(&mut self) {
+        self.join_thread();
+        let mut out = io::stdout();
+        let _ = execute!(out, MoveToColumn(0), Clear(ClearType::CurrentLine));
+        let _ = out.flush();
+    }
+
+    /// Stop the spinner and replace it with a styled finish/fail message.
+    pub fn stop_with_finish(&mut self, label: &str) {
+        self.join_thread();
+        let theme = ColorTheme::default();
+        let mut s = Spinner::new();
+        let _ = s.finish(label, &theme, &mut io::stdout());
+    }
+
+    pub fn stop_with_fail(&mut self, label: &str) {
+        self.join_thread();
+        let theme = ColorTheme::default();
+        let mut s = Spinner::new();
+        let _ = s.fail(label, &theme, &mut io::stdout());
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ListKind {
     Unordered,
@@ -607,13 +681,33 @@ pub struct MarkdownStreamState {
 }
 
 impl MarkdownStreamState {
+    /// Drain every flush-safe prefix after appending `delta`. Callers that want
+    /// visible streaming should write each segment separately (with small async
+    /// delays between) instead of concatenating — a single SSE chunk may yield
+    /// many segments, and writing them in one `write!` looks instantaneous.
+    #[must_use]
+    pub fn push_ready_segments(&mut self, renderer: &TerminalRenderer, delta: &str) -> Vec<String> {
+        self.pending.push_str(delta);
+        let mut segments = Vec::new();
+        while let Some(split) = find_stream_safe_boundary(&self.pending) {
+            let ready = self.pending[..split].to_string();
+            self.pending.drain(..split);
+            let rendered = renderer.markdown_to_ansi(&ready);
+            if !rendered.is_empty() {
+                segments.push(rendered);
+            }
+        }
+        segments
+    }
+
     #[must_use]
     pub fn push(&mut self, renderer: &TerminalRenderer, delta: &str) -> Option<String> {
-        self.pending.push_str(delta);
-        let split = find_stream_safe_boundary(&self.pending)?;
-        let ready = self.pending[..split].to_string();
-        self.pending.drain(..split);
-        Some(renderer.markdown_to_ansi(&ready))
+        let segments = self.push_ready_segments(renderer, delta);
+        if segments.is_empty() {
+            None
+        } else {
+            Some(segments.concat())
+        }
     }
 
     #[must_use]
@@ -811,9 +905,16 @@ fn normalize_nested_fences(markdown: &str) -> String {
     out
 }
 
+/// Outside fenced code blocks, flush after each full line so streamed tokens appear
+/// incrementally (instead of buffering until a blank line or block end).
+///
+/// Inside a fence, only flush once the closing fence line is complete. For very long
+/// lines without `\n` (rare from APIs but possible), flush at a word boundary up to
+/// `MAX_UNBROKEN_LINE` chars so the terminal does not stay frozen on "Thinking...".
 fn find_stream_safe_boundary(markdown: &str) -> Option<usize> {
+    const MAX_UNBROKEN_LINE: usize = 240;
+
     let mut open_fence: Option<FenceMarker> = None;
-    let mut last_boundary = None;
 
     for (offset, line) in markdown.split_inclusive('\n').scan(0usize, |cursor, line| {
         let start = *cursor;
@@ -823,8 +924,7 @@ fn find_stream_safe_boundary(markdown: &str) -> Option<usize> {
         let line_without_newline = line.trim_end_matches('\n');
         if let Some(opener) = open_fence {
             if line_closes_fence(line_without_newline, opener) {
-                open_fence = None;
-                last_boundary = Some(offset + line.len());
+                return Some(offset + line.len());
             }
             continue;
         }
@@ -834,12 +934,21 @@ fn find_stream_safe_boundary(markdown: &str) -> Option<usize> {
             continue;
         }
 
-        if line_without_newline.trim().is_empty() {
-            last_boundary = Some(offset + line.len());
+        if line.ends_with('\n') {
+            return Some(offset + line.len());
         }
     }
 
-    last_boundary
+    if open_fence.is_none() && markdown.len() > MAX_UNBROKEN_LINE {
+        let slice = &markdown[..MAX_UNBROKEN_LINE];
+        if let Some(rel) = slice.rfind(char::is_whitespace) {
+            let end = (rel + 1).min(markdown.len());
+            return Some(markdown.floor_char_boundary(end));
+        }
+        return Some(markdown.floor_char_boundary(MAX_UNBROKEN_LINE));
+    }
+
+    None
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
