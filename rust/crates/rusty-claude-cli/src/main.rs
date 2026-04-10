@@ -41,7 +41,7 @@ use commands::{
 use compat_harness::{extract_manifest, UpstreamPaths};
 use init::initialize_repo;
 use plugins::{PluginHooks, PluginManager, PluginManagerConfig, PluginRegistry};
-use render::{MarkdownStreamState, Spinner, TerminalRenderer};
+use render::{MarkdownStreamState, TerminalRenderer};
 use runtime::{
     check_base_commit, clear_oauth_credentials, format_stale_base_warning, format_usd,
     generate_pkce_pair, generate_state, load_oauth_credentials, load_system_prompt,
@@ -117,7 +117,10 @@ fn ensure_kplr_key() {
     // Skip subcommands that don't need the key
     let args: Vec<String> = env::args().skip(1).collect();
     let first = args.first().map(|s| s.as_str()).unwrap_or("");
-    if matches!(first, "--help" | "-h" | "--version" | "-V" | "version" | "help") {
+    if matches!(
+        first,
+        "--help" | "-h" | "--version" | "-V" | "version" | "help"
+    ) {
         return;
     }
 
@@ -177,7 +180,9 @@ fn ensure_kplr_key() {
 
 fn kplr_config_path() -> Option<PathBuf> {
     let home = env::var("HOME").ok()?;
-    Some(PathBuf::from(format!("{home}/.config/physmind/credentials")))
+    Some(PathBuf::from(format!(
+        "{home}/.config/physmind/credentials"
+    )))
 }
 
 fn load_kplr_key_from_config() -> Option<String> {
@@ -216,7 +221,9 @@ fn persist_kplr_key(key: &str) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(not(target_os = "windows"))]
     {
         let home = env::var("HOME")?;
-        let is_fish = env::var("SHELL").map(|s| s.contains("fish")).unwrap_or(false);
+        let is_fish = env::var("SHELL")
+            .map(|s| s.contains("fish"))
+            .unwrap_or(false);
 
         // Detect which shell profile to write to
         let profile_path = if let Ok(shell) = env::var("SHELL") {
@@ -237,8 +244,16 @@ fn persist_kplr_key(key: &str) -> Result<(), Box<dyn std::error::Error>> {
             format!("\nexport KPLR_KEY=\"{key}\"\n")
         };
 
-        let search_marker = if is_fish { "set -Ux KPLR_KEY" } else { "KPLR_KEY=" };
-        let replace_prefix = if is_fish { "set -Ux KPLR_KEY" } else { "export KPLR_KEY=" };
+        let search_marker = if is_fish {
+            "set -Ux KPLR_KEY"
+        } else {
+            "KPLR_KEY="
+        };
+        let replace_prefix = if is_fish {
+            "set -Ux KPLR_KEY"
+        } else {
+            "export KPLR_KEY="
+        };
         let replace_line = if is_fish {
             format!("set -Ux KPLR_KEY \"{key}\"")
         } else {
@@ -2975,10 +2990,7 @@ fn run_repl(
                 if trimmed.starts_with('!') {
                     let cmd = trimmed[1..].trim();
                     if !cmd.is_empty() {
-                        let status = std::process::Command::new("sh")
-                            .arg("-c")
-                            .arg(cmd)
-                            .status();
+                        let status = std::process::Command::new("sh").arg("-c").arg(cmd).status();
                         match status {
                             Ok(s) if !s.success() => {
                                 eprintln!("exit code: {}", s.code().unwrap_or(-1));
@@ -3621,27 +3633,15 @@ impl LiveCli {
 
     fn run_turn(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
         let (mut runtime, hook_abort_monitor) = self.prepare_turn_runtime(true)?;
-        let mut spinner = Spinner::new();
-        let mut stdout = io::stdout();
-        spinner.tick(
-            "Thinking...",
-            TerminalRenderer::new().color_theme(),
-            &mut stdout,
-        )?;
+        let mut animated = render::AnimatedSpinner::start("Thinking...");
         let mut permission_prompter = CliPermissionPrompter::new(self.permission_mode);
         let result = runtime.run_turn(input, Some(&mut permission_prompter));
         hook_abort_monitor.stop();
         match result {
             Ok(summary) => {
                 self.replace_runtime(runtime)?;
-                // Move to a fresh line so spinner.finish() doesn't clear the last
-                // line of the response (which may not end with a newline).
-                writeln!(stdout)?;
-                spinner.finish(
-                    "✨ Done",
-                    TerminalRenderer::new().color_theme(),
-                    &mut stdout,
-                )?;
+                writeln!(io::stdout())?;
+                animated.stop_with_finish("✨ Done");
                 if let Some(event) = summary.auto_compaction {
                     println!(
                         "{}",
@@ -3653,11 +3653,7 @@ impl LiveCli {
             }
             Err(error) => {
                 runtime.shutdown_plugins()?;
-                spinner.fail(
-                    "❌ Request failed",
-                    TerminalRenderer::new().color_theme(),
-                    &mut stdout,
-                )?;
+                animated.stop_with_fail("❌ Request failed");
                 Err(Box::new(error))
             }
         }
@@ -6727,6 +6723,7 @@ impl AnthropicRuntimeClient {
         } else {
             &mut sink
         };
+        let is_tty = self.emit_output && std::io::stdout().is_terminal();
         let renderer = TerminalRenderer::new();
         let mut markdown_stream = MarkdownStreamState::default();
         let mut events = Vec::new();
@@ -6737,6 +6734,7 @@ impl AnthropicRuntimeClient {
         let mut thinking_start_time: Option<std::time::Instant> = None;
         let mut received_any_event = false;
         let mut first_text_written = false;
+        let mut last_text_write = std::time::Instant::now();
 
         loop {
             let next = if apply_stall_timeout && !received_any_event {
@@ -6790,16 +6788,27 @@ impl AnthropicRuntimeClient {
                             if let Some(progress_reporter) = &self.progress_reporter {
                                 progress_reporter.mark_text_phase(&text);
                             }
-                            if let Some(rendered) = markdown_stream.push(&renderer, &text) {
+                            let segments = markdown_stream.push_ready_segments(&renderer, &text);
+                            for segment in &segments {
                                 if !first_text_written {
                                     first_text_written = true;
+                                    render::signal_spinner_stop();
+                                    std::thread::sleep(Duration::from_millis(100));
                                     write!(out, "\r\x1b[2K")
                                         .and_then(|()| out.flush())
                                         .map_err(|e| RuntimeError::new(e.to_string()))?;
                                 }
-                                write!(out, "{rendered}")
+                                write!(out, "{segment}")
                                     .and_then(|()| out.flush())
                                     .map_err(|error| RuntimeError::new(error.to_string()))?;
+                                if is_tty {
+                                    let elapsed = last_text_write.elapsed();
+                                    if elapsed < Duration::from_millis(8) {
+                                        tokio::time::sleep(Duration::from_millis(8) - elapsed)
+                                            .await;
+                                    }
+                                    last_text_write = std::time::Instant::now();
+                                }
                             }
                             events.push(AssistantEvent::TextDelta(text));
                         }
@@ -6813,16 +6822,15 @@ impl AnthropicRuntimeClient {
                         if !thinking_started {
                             thinking_started = true;
                             thinking_start_time = Some(std::time::Instant::now());
-                            writeln!(out, "\r\x1b[2K\x1b[2m\x1b[38;5;245mThinking...\x1b[0m")
+                            render::signal_spinner_stop();
+                            std::thread::sleep(Duration::from_millis(100));
+                            write!(out, "\r\x1b[2K\x1b[2m\x1b[38;5;245m")
                                 .map_err(|e| RuntimeError::new(e.to_string()))?;
                         }
-                        // Simulate streaming: print char by char
-                        for ch in thinking.chars() {
-                            write!(out, "\x1b[2m\x1b[38;5;245m{ch}\x1b[0m")
-                                .and_then(|()| out.flush())
-                                .map_err(|e| RuntimeError::new(e.to_string()))?;
-                            std::thread::sleep(std::time::Duration::from_millis(5));
-                        }
+                        // Stream reasoning as the API delivers chunks (no artificial delay).
+                        write!(out, "{thinking}")
+                            .and_then(|()| out.flush())
+                            .map_err(|e| RuntimeError::new(e.to_string()))?;
                         block_has_thinking_summary = true;
                     }
                     ContentBlockDelta::SignatureDelta { .. } => {}
@@ -6832,15 +6840,25 @@ impl AnthropicRuntimeClient {
                         let elapsed = thinking_start_time
                             .map(|t| t.elapsed().as_secs().max(1))
                             .unwrap_or(1);
-                        // Print separator after streamed thinking
-                        writeln!(out, "\n\x1b[2m\x1b[38;5;245m─── thought for {elapsed}s ───\x1b[0m")
-                            .and_then(|()| out.flush())
-                            .map_err(|e| RuntimeError::new(e.to_string()))?;
+                        writeln!(
+                            out,
+                            "\n\x1b[2m\x1b[38;5;245m─── thought for {elapsed}s ───\x1b[0m"
+                        )
+                        .and_then(|()| out.flush())
+                        .map_err(|e| RuntimeError::new(e.to_string()))?;
                         thinking_started = false;
                         thinking_start_time = None;
                     }
                     block_has_thinking_summary = false;
                     if let Some(rendered) = markdown_stream.flush(&renderer) {
+                        if !first_text_written {
+                            first_text_written = true;
+                            render::signal_spinner_stop();
+                            std::thread::sleep(Duration::from_millis(100));
+                            write!(out, "\r\x1b[2K")
+                                .and_then(|()| out.flush())
+                                .map_err(|e| RuntimeError::new(e.to_string()))?;
+                        }
                         write!(out, "{rendered}")
                             .and_then(|()| out.flush())
                             .map_err(|error| RuntimeError::new(error.to_string()))?;
@@ -6849,7 +6867,6 @@ impl AnthropicRuntimeClient {
                         if let Some(progress_reporter) = &self.progress_reporter {
                             progress_reporter.mark_tool_phase(&name, &input);
                         }
-                        // Display tool call now that input is fully accumulated
                         writeln!(out, "\n{}", format_tool_call_start(&name, &input))
                             .and_then(|()| out.flush())
                             .map_err(|error| RuntimeError::new(error.to_string()))?;
@@ -7940,7 +7957,10 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
     writeln!(out, "  physmind agents")?;
     writeln!(out, "  physmind mcp")?;
     writeln!(out, "  physmind skills")?;
-    writeln!(out, "  physmind system-prompt [--cwd PATH] [--date YYYY-MM-DD]")?;
+    writeln!(
+        out,
+        "  physmind system-prompt [--cwd PATH] [--date YYYY-MM-DD]"
+    )?;
     writeln!(out, "  physmind login")?;
     writeln!(out, "  physmind logout")?;
     writeln!(out, "  physmind init")?;
@@ -8007,7 +8027,10 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
         "  Use /session list in the REPL to browse managed sessions"
     )?;
     writeln!(out, "Examples:")?;
-    writeln!(out, "  physmind --model claude-opus \"summarize this repo\"")?;
+    writeln!(
+        out,
+        "  physmind --model claude-opus \"summarize this repo\""
+    )?;
     writeln!(
         out,
         "  claw --output-format json prompt \"explain src/main.rs\""
