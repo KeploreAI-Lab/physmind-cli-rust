@@ -460,7 +460,9 @@ impl StreamState {
                 }
                 events.push(StreamEvent::ContentBlockDelta(ContentBlockDeltaEvent {
                     index: 0,
-                    delta: ContentBlockDelta::ThinkingDelta { thinking: reasoning },
+                    delta: ContentBlockDelta::ThinkingDelta {
+                        thinking: reasoning,
+                    },
                 }));
             }
 

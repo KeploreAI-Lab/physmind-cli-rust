@@ -41,7 +41,7 @@ use commands::{
 use compat_harness::{extract_manifest, UpstreamPaths};
 use init::initialize_repo;
 use plugins::{PluginHooks, PluginManager, PluginManagerConfig, PluginRegistry};
-use render::TerminalRenderer;
+use render::{MarkdownStreamState, TerminalRenderer};
 use runtime::{
     check_base_commit, clear_oauth_credentials, format_stale_base_warning, format_usd,
     generate_pkce_pair, generate_state, load_oauth_credentials, load_system_prompt,
@@ -117,7 +117,10 @@ fn ensure_kplr_key() {
     // Skip subcommands that don't need the key
     let args: Vec<String> = env::args().skip(1).collect();
     let first = args.first().map(|s| s.as_str()).unwrap_or("");
-    if matches!(first, "--help" | "-h" | "--version" | "-V" | "version" | "help") {
+    if matches!(
+        first,
+        "--help" | "-h" | "--version" | "-V" | "version" | "help"
+    ) {
         return;
     }
 
@@ -177,7 +180,9 @@ fn ensure_kplr_key() {
 
 fn kplr_config_path() -> Option<PathBuf> {
     let home = env::var("HOME").ok()?;
-    Some(PathBuf::from(format!("{home}/.config/physmind/credentials")))
+    Some(PathBuf::from(format!(
+        "{home}/.config/physmind/credentials"
+    )))
 }
 
 fn load_kplr_key_from_config() -> Option<String> {
@@ -216,7 +221,9 @@ fn persist_kplr_key(key: &str) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(not(target_os = "windows"))]
     {
         let home = env::var("HOME")?;
-        let is_fish = env::var("SHELL").map(|s| s.contains("fish")).unwrap_or(false);
+        let is_fish = env::var("SHELL")
+            .map(|s| s.contains("fish"))
+            .unwrap_or(false);
 
         // Detect which shell profile to write to
         let profile_path = if let Ok(shell) = env::var("SHELL") {
@@ -237,8 +244,16 @@ fn persist_kplr_key(key: &str) -> Result<(), Box<dyn std::error::Error>> {
             format!("\nexport KPLR_KEY=\"{key}\"\n")
         };
 
-        let search_marker = if is_fish { "set -Ux KPLR_KEY" } else { "KPLR_KEY=" };
-        let replace_prefix = if is_fish { "set -Ux KPLR_KEY" } else { "export KPLR_KEY=" };
+        let search_marker = if is_fish {
+            "set -Ux KPLR_KEY"
+        } else {
+            "KPLR_KEY="
+        };
+        let replace_prefix = if is_fish {
+            "set -Ux KPLR_KEY"
+        } else {
+            "export KPLR_KEY="
+        };
         let replace_line = if is_fish {
             format!("set -Ux KPLR_KEY \"{key}\"")
         } else {
@@ -2975,10 +2990,7 @@ fn run_repl(
                 if trimmed.starts_with('!') {
                     let cmd = trimmed[1..].trim();
                     if !cmd.is_empty() {
-                        let status = std::process::Command::new("sh")
-                            .arg("-c")
-                            .arg(cmd)
-                            .status();
+                        let status = std::process::Command::new("sh").arg("-c").arg(cmd).status();
                         match status {
                             Ok(s) if !s.success() => {
                                 eprintln!("exit code: {}", s.code().unwrap_or(-1));
@@ -6711,10 +6723,9 @@ impl AnthropicRuntimeClient {
         } else {
             &mut sink
         };
-        // When stdout is a terminal, pace token writes so the terminal emulator
-        // has time to render between them. Without this, tokens that arrive in a
-        // single HTTP chunk get written in a tight loop and appear all at once.
         let is_tty = self.emit_output && std::io::stdout().is_terminal();
+        let renderer = TerminalRenderer::new();
+        let mut markdown_stream = MarkdownStreamState::default();
         let mut events = Vec::new();
         let mut pending_tool: Option<(String, String, String)> = None;
         let mut block_has_thinking_summary = false;
@@ -6723,8 +6734,6 @@ impl AnthropicRuntimeClient {
         let mut thinking_start_time: Option<std::time::Instant> = None;
         let mut received_any_event = false;
         let mut first_text_written = false;
-        let mut raw_text_buf = String::new();
-        let mut raw_text_bytes_written: usize = 0;
         let mut last_text_write = std::time::Instant::now();
 
         loop {
@@ -6779,31 +6788,27 @@ impl AnthropicRuntimeClient {
                             if let Some(progress_reporter) = &self.progress_reporter {
                                 progress_reporter.mark_text_phase(&text);
                             }
-                            if !first_text_written {
-                                first_text_written = true;
-                                render::signal_spinner_stop();
-                                std::thread::sleep(Duration::from_millis(100));
-                                write!(out, "\r\x1b[2K")
-                                    .and_then(|()| out.flush())
-                                    .map_err(|e| RuntimeError::new(e.to_string()))?;
-                            }
-                            write!(out, "{text}")
-                                .and_then(|()| out.flush())
-                                .map_err(|error| RuntimeError::new(error.to_string()))?;
-                            raw_text_bytes_written += text.len();
-                            raw_text_buf.push_str(&text);
-                            // Give the terminal emulator time to render this
-                            // token before the next one arrives. Without this,
-                            // tokens from a buffered HTTP chunk appear at once.
-                            if is_tty {
-                                let elapsed = last_text_write.elapsed();
-                                if elapsed < Duration::from_millis(8) {
-                                    tokio::time::sleep(
-                                        Duration::from_millis(8) - elapsed,
-                                    )
-                                    .await;
+                            let segments = markdown_stream.push_ready_segments(&renderer, &text);
+                            for segment in &segments {
+                                if !first_text_written {
+                                    first_text_written = true;
+                                    render::signal_spinner_stop();
+                                    std::thread::sleep(Duration::from_millis(100));
+                                    write!(out, "\r\x1b[2K")
+                                        .and_then(|()| out.flush())
+                                        .map_err(|e| RuntimeError::new(e.to_string()))?;
                                 }
-                                last_text_write = std::time::Instant::now();
+                                write!(out, "{segment}")
+                                    .and_then(|()| out.flush())
+                                    .map_err(|error| RuntimeError::new(error.to_string()))?;
+                                if is_tty {
+                                    let elapsed = last_text_write.elapsed();
+                                    if elapsed < Duration::from_millis(8) {
+                                        tokio::time::sleep(Duration::from_millis(8) - elapsed)
+                                            .await;
+                                    }
+                                    last_text_write = std::time::Instant::now();
+                                }
                             }
                             events.push(AssistantEvent::TextDelta(text));
                         }
@@ -6835,23 +6840,29 @@ impl AnthropicRuntimeClient {
                         let elapsed = thinking_start_time
                             .map(|t| t.elapsed().as_secs().max(1))
                             .unwrap_or(1);
-                        writeln!(out, "\n\x1b[2m\x1b[38;5;245m─── thought for {elapsed}s ───\x1b[0m")
-                            .and_then(|()| out.flush())
-                            .map_err(|e| RuntimeError::new(e.to_string()))?;
+                        writeln!(
+                            out,
+                            "\n\x1b[2m\x1b[38;5;245m─── thought for {elapsed}s ───\x1b[0m"
+                        )
+                        .and_then(|()| out.flush())
+                        .map_err(|e| RuntimeError::new(e.to_string()))?;
                         thinking_started = false;
                         thinking_start_time = None;
                     }
                     block_has_thinking_summary = false;
-                    // Ensure a trailing newline after the streamed block.
-                    if raw_text_bytes_written > 0
-                        && !raw_text_buf.ends_with('\n')
-                    {
-                        writeln!(out)
+                    if let Some(rendered) = markdown_stream.flush(&renderer) {
+                        if !first_text_written {
+                            first_text_written = true;
+                            render::signal_spinner_stop();
+                            std::thread::sleep(Duration::from_millis(100));
+                            write!(out, "\r\x1b[2K")
+                                .and_then(|()| out.flush())
+                                .map_err(|e| RuntimeError::new(e.to_string()))?;
+                        }
+                        write!(out, "{rendered}")
                             .and_then(|()| out.flush())
-                            .map_err(|e| RuntimeError::new(e.to_string()))?;
+                            .map_err(|error| RuntimeError::new(error.to_string()))?;
                     }
-                    raw_text_buf.clear();
-                    raw_text_bytes_written = 0;
                     if let Some((id, name, input)) = pending_tool.take() {
                         if let Some(progress_reporter) = &self.progress_reporter {
                             progress_reporter.mark_tool_phase(&name, &input);
@@ -6867,15 +6878,11 @@ impl AnthropicRuntimeClient {
                 }
                 ApiStreamEvent::MessageStop(_) => {
                     saw_stop = true;
-                    if raw_text_bytes_written > 0
-                        && !raw_text_buf.ends_with('\n')
-                    {
-                        writeln!(out)
+                    if let Some(rendered) = markdown_stream.flush(&renderer) {
+                        write!(out, "{rendered}")
                             .and_then(|()| out.flush())
-                            .map_err(|e| RuntimeError::new(e.to_string()))?;
+                            .map_err(|error| RuntimeError::new(error.to_string()))?;
                     }
-                    raw_text_buf.clear();
-                    raw_text_bytes_written = 0;
                     events.push(AssistantEvent::MessageStop);
                 }
             }
@@ -7950,7 +7957,10 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
     writeln!(out, "  physmind agents")?;
     writeln!(out, "  physmind mcp")?;
     writeln!(out, "  physmind skills")?;
-    writeln!(out, "  physmind system-prompt [--cwd PATH] [--date YYYY-MM-DD]")?;
+    writeln!(
+        out,
+        "  physmind system-prompt [--cwd PATH] [--date YYYY-MM-DD]"
+    )?;
     writeln!(out, "  physmind login")?;
     writeln!(out, "  physmind logout")?;
     writeln!(out, "  physmind init")?;
@@ -8017,7 +8027,10 @@ fn print_help_to(out: &mut impl Write) -> io::Result<()> {
         "  Use /session list in the REPL to browse managed sessions"
     )?;
     writeln!(out, "Examples:")?;
-    writeln!(out, "  physmind --model claude-opus \"summarize this repo\"")?;
+    writeln!(
+        out,
+        "  physmind --model claude-opus \"summarize this repo\""
+    )?;
     writeln!(
         out,
         "  claw --output-format json prompt \"explain src/main.rs\""

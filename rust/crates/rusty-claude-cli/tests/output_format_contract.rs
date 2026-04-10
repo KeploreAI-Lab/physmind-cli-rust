@@ -161,10 +161,7 @@ fn bootstrap_and_system_prompt_emit_json_when_requested() {
 
     let prompt = assert_json_command(&root, &["--output-format", "json", "system-prompt"]);
     assert_eq!(prompt["kind"], "system-prompt");
-    assert!(prompt["message"]
-        .as_str()
-        .expect("prompt text")
-        .len() > 10);
+    assert!(prompt["message"].as_str().expect("prompt text").len() > 10);
 }
 
 #[test]
